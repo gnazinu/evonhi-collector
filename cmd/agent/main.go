@@ -2,58 +2,47 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
 	"os"
-	"path/filepath"
+	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/homedir"
+	"github.com/tu-usuario/evonhi-collector/internal/k8s"
 )
 
 func main() {
-	var kubeconfig *string
-	if home := homedir.HomeDir(); home != "" {
-		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
-	} else {
-		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
-	}
+	kubeconfig := flag.String("kubeconfig", "", "optional path to kubeconfig (fallback when not in-cluster)")
+	clusterID := flag.String("cluster-id", envOrDefault("EVONHI_CLUSTER_ID", "unknown"), "logical cluster identifier")
+	pretty := flag.Bool("pretty", true, "pretty-print JSON output")
+	timeout := flag.Duration("timeout", 2*time.Minute, "collection timeout")
 	flag.Parse()
 
-	// 1. Construir la configuración a partir del archivo kubeconfig local
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	cs, err := k8s.BuildClient(*kubeconfig)
 	if err != nil {
-		log.Fatalf("Error building kubeconfig: %s", err.Error())
+		log.Fatalf("k8s client: %v", err)
 	}
 
-	// 2. Crear el cliente de Kubernetes
-	clientset, err := kubernetes.NewForConfig(config)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	payload, err := k8s.Collect(ctx, cs, *clusterID)
 	if err != nil {
-		log.Fatalf("Error creating clientset: %s", err.Error())
+		log.Fatalf("collect: %v", err)
 	}
 
-	ctx := context.Background()
+	enc := json.NewEncoder(os.Stdout)
+	if *pretty {
+		enc.SetIndent("", "  ")
+	}
+	if err := enc.Encode(payload); err != nil {
+		log.Fatalf("encode: %v", err)
+	}
+}
 
-	// 3. Extraer ServiceAccounts
-	fmt.Println("--- Fetching ServiceAccounts ---")
-	saList, err := clientset.CoreV1().ServiceAccounts("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		log.Fatalf("Error listing ServiceAccounts: %s", err.Error())
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	for _, sa := range saList.Items {
-		fmt.Printf("Namespace: %s | Name: %s\n", sa.Namespace, sa.Name)
-	}
-
-	// 4. Extraer RoleBindings
-	fmt.Println("\n--- Fetching RoleBindings ---")
-	rbList, err := clientset.RbacV1().RoleBindings("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		log.Fatalf("Error listing RoleBindings: %s", err.Error())
-	}
-	for _, rb := range rbList.Items {
-		fmt.Printf("Namespace: %s | Name: %s | RoleRef: %s\n", rb.Namespace, rb.Name, rb.RoleRef.Name)
-	}
+	return def
 }
