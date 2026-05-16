@@ -10,22 +10,26 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/tu-usuario/evonhi-collector/internal/sign"
 )
 
 const (
 	headerToken     = "X-Connector-Token"
+	headerSignature = "X-Evonhi-Signature"
 	headerTimestamp = "X-Evonhi-Timestamp"
 	userAgent       = "evonhi-collector/0.1"
 )
 
 type Client struct {
-	endpoint   string
-	token      string
-	http       *http.Client
-	backoff    *Backoff
+	endpoint string
+	token    string
+	hmacKey  string
+	http     *http.Client
+	backoff  *Backoff
 }
 
-func NewClient(endpoint, token string, perRequestTimeout, maxElapsed time.Duration) *Client {
+func NewClient(endpoint, token, hmacKey string, perRequestTimeout, maxElapsed time.Duration) *Client {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   5 * time.Second,
@@ -39,6 +43,7 @@ func NewClient(endpoint, token string, perRequestTimeout, maxElapsed time.Durati
 	return &Client{
 		endpoint: endpoint,
 		token:    token,
+		hmacKey:  hmacKey,
 		http: &http.Client{
 			Transport: transport,
 			Timeout:   perRequestTimeout,
@@ -92,10 +97,18 @@ func (c *Client) doOnce(ctx context.Context, body []byte) (int, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	// Sign timestamp || payload to prevent replay of an old (timestamp, signature) pair.
+	signed := make([]byte, 0, len(timestamp)+len(body))
+	signed = append(signed, timestamp...)
+	signed = append(signed, body...)
+	signature := sign.GenerateSignature(signed, c.hmacKey)
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set(headerToken, c.token)
-	req.Header.Set(headerTimestamp, time.Now().UTC().Format(time.RFC3339))
+	req.Header.Set(headerSignature, signature)
+	req.Header.Set(headerTimestamp, timestamp)
 
 	resp, err := c.http.Do(req)
 	if err != nil {

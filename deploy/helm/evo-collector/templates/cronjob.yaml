@@ -61,6 +61,11 @@ spec:
                     secretKeyRef:
                       name: {{ include "evo-collector.tokenSecretName" . }}
                       key: {{ include "evo-collector.tokenSecretKey" . }}
+                - name: EVONHI_HMAC_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "evo-collector.tokenSecretName" . }}
+                      key: hmac-key
                 - name: EVONHI_ENABLE_SECRET_READING
                   value: {{ .Values.rbac.allowSecretReading | quote }}
                 {{- if .Values.proxy.http }}

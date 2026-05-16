@@ -43,7 +43,7 @@ func main() {
 		return
 	}
 
-	client := sender.NewClient(cfg.Endpoint, cfg.Token, cfg.SendTimeout, cfg.MaxElapsed)
+	client := sender.NewClient(cfg.Endpoint, cfg.Token, cfg.HMACKey, cfg.SendTimeout, cfg.MaxElapsed)
 	sendCtx, cancelSend := context.WithTimeout(context.Background(), cfg.MaxElapsed)
 	defer cancelSend()
 	if err := client.Send(sendCtx, env); err != nil {

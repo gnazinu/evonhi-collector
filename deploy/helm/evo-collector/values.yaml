@@ -18,6 +18,10 @@ token:
     name: ""
     key: "token"
 
+# HMAC-SHA256 signing key. Required when token.create=true; the control plane
+# verifies the X-Evonhi-Signature header against this shared secret per environment.
+hmacKey: ""
+
 rbac:
   # Zero-Trust default: the agent does NOT call the Secrets API.
   # When false, SecretRef entries are inferred from Pod mount references
