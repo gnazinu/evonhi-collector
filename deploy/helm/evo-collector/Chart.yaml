@@ -1,0 +1,12 @@
+apiVersion: v2
+name: evo-collector
+description: EvoNHI Collector — read-only telemetry agent for Kubernetes RBAC/NHI graph
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - evonhi
+  - rbac
+  - nhi
+  - security
+home: https://evonhi.io

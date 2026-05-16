@@ -3,46 +3,50 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"log"
 	"os"
-	"time"
 
+	"github.com/tu-usuario/evonhi-collector/internal/config"
 	"github.com/tu-usuario/evonhi-collector/internal/k8s"
+	"github.com/tu-usuario/evonhi-collector/internal/sender"
 )
 
 func main() {
-	kubeconfig := flag.String("kubeconfig", "", "optional path to kubeconfig (fallback when not in-cluster)")
-	clusterID := flag.String("cluster-id", envOrDefault("EVONHI_CLUSTER_ID", "unknown"), "logical cluster identifier")
-	pretty := flag.Bool("pretty", true, "pretty-print JSON output")
-	timeout := flag.Duration("timeout", 2*time.Minute, "collection timeout")
-	flag.Parse()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
 
-	cs, err := k8s.BuildClient(*kubeconfig)
+	cs, err := k8s.BuildClient(cfg.KubeconfigPath)
 	if err != nil {
 		log.Fatalf("k8s client: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
+	collectCtx, cancelCollect := context.WithTimeout(context.Background(), cfg.CollectTimeout)
+	defer cancelCollect()
 
-	payload, err := k8s.Collect(ctx, cs, *clusterID)
+	payload, err := k8s.Collect(collectCtx, cs, cfg.ClusterID, cfg.EnableSecretReading)
 	if err != nil {
 		log.Fatalf("collect: %v", err)
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	if *pretty {
-		enc.SetIndent("", "  ")
-	}
-	if err := enc.Encode(payload); err != nil {
-		log.Fatalf("encode: %v", err)
-	}
-}
+	env := sender.BuildEnvelope(payload)
 
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	if cfg.DryRun {
+		enc := json.NewEncoder(os.Stdout)
+		if cfg.Pretty {
+			enc.SetIndent("", "  ")
+		}
+		if err := enc.Encode(env); err != nil {
+			log.Fatalf("encode: %v", err)
+		}
+		return
 	}
-	return def
+
+	client := sender.NewClient(cfg.Endpoint, cfg.Token, cfg.SendTimeout, cfg.MaxElapsed)
+	sendCtx, cancelSend := context.WithTimeout(context.Background(), cfg.MaxElapsed)
+	defer cancelSend()
+	if err := client.Send(sendCtx, env); err != nil {
+		log.Fatalf("send: %v", err)
+	}
 }

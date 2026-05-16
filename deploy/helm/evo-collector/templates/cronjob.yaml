@@ -1,0 +1,89 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "evo-collector.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "evo-collector.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: {{ .Values.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "evo-collector.labels" . | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "evo-collector.fullname" . }}
+          restartPolicy: OnFailure
+          {{- with .Values.nodeSelector }}
+          nodeSelector: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+            runAsUser: {{ .Values.securityContext.runAsUser }}
+            runAsGroup: {{ .Values.securityContext.runAsGroup }}
+            seccompProfile:
+              type: {{ .Values.securityContext.seccompProfile.type }}
+          containers:
+            - name: collector
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args:
+                - "--cluster-id=$(EVONHI_CLUSTER_ID)"
+                - "--endpoint=$(EVONHI_ENDPOINT)"
+                - "--collect-timeout=$(EVONHI_COLLECT_TIMEOUT)"
+                - "--send-timeout=$(EVONHI_SEND_TIMEOUT)"
+                - "--max-elapsed=$(EVONHI_MAX_ELAPSED)"
+              env:
+                - name: EVONHI_CLUSTER_ID
+                  value: {{ .Values.clusterId | quote }}
+                - name: EVONHI_ENDPOINT
+                  value: {{ .Values.endpoint | quote }}
+                - name: EVONHI_COLLECT_TIMEOUT
+                  value: {{ .Values.timeouts.collect | quote }}
+                - name: EVONHI_SEND_TIMEOUT
+                  value: {{ .Values.timeouts.send | quote }}
+                - name: EVONHI_MAX_ELAPSED
+                  value: {{ .Values.timeouts.maxElapsed | quote }}
+                - name: EVONHI_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "evo-collector.tokenSecretName" . }}
+                      key: {{ include "evo-collector.tokenSecretKey" . }}
+                - name: EVONHI_ENABLE_SECRET_READING
+                  value: {{ .Values.rbac.allowSecretReading | quote }}
+                {{- if .Values.proxy.http }}
+                - name: HTTP_PROXY
+                  value: {{ .Values.proxy.http | quote }}
+                - name: http_proxy
+                  value: {{ .Values.proxy.http | quote }}
+                {{- end }}
+                {{- if .Values.proxy.https }}
+                - name: HTTPS_PROXY
+                  value: {{ .Values.proxy.https | quote }}
+                - name: https_proxy
+                  value: {{ .Values.proxy.https | quote }}
+                {{- end }}
+                {{- if .Values.proxy.noProxy }}
+                - name: NO_PROXY
+                  value: {{ .Values.proxy.noProxy | quote }}
+                - name: no_proxy
+                  value: {{ .Values.proxy.noProxy | quote }}
+                {{- end }}
+              securityContext:
+                readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
+                allowPrivilegeEscalation: {{ .Values.securityContext.allowPrivilegeEscalation }}
+                capabilities:
+                  drop: {{- toYaml .Values.securityContext.capabilities.drop | nindent 20 }}
+              resources: {{- toYaml .Values.resources | nindent 16 }}

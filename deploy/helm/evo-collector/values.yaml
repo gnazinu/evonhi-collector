@@ -1,0 +1,75 @@
+image:
+  repository: ghcr.io/evonhi/evo-collector
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Logical cluster identifier reported in every payload.
+clusterId: "default-cluster"
+
+# Telemetry endpoint of the EvoNHI control plane.
+endpoint: "https://api.evonhi.io/api/v1/connector-ingest/telemetry"
+
+# Connector token. Either provide tokenValue (chart will create a Secret)
+# or set tokenSecretRef to point at an existing Secret.
+token:
+  create: true
+  value: ""                # required if create=true
+  secretRef:               # used if create=false
+    name: ""
+    key: "token"
+
+rbac:
+  # Zero-Trust default: the agent does NOT call the Secrets API.
+  # When false, SecretRef entries are inferred from Pod mount references
+  # (no Type/Labels/Annotations). Flip to true only for full secret-graph mode.
+  allowSecretReading: false
+
+# Corporate-egress support. When http/https are set, they are wired
+# into HTTP_PROXY/HTTPS_PROXY/NO_PROXY env vars; the Go HTTP client picks them
+# up automatically.
+proxy:
+  http: ""
+  https: ""
+  noProxy: ""
+
+schedule: "0 */6 * * *"    # every 6 hours
+successfulJobsHistoryLimit: 3
+failedJobsHistoryLimit: 1
+concurrencyPolicy: Forbid
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+timeouts:
+  collect: "2m"
+  send: "30s"
+  maxElapsed: "10m"
+
+# Egress allow-list. Disabled by default because FQDN egress is not portable
+# across CNIs (Calico/Cilium/etc.). Enable only after confirming your CNI supports
+# the rules you want, and set egressCIDRs to your control-plane network.
+networkPolicy:
+  enabled: false
+  egressCIDRs:
+    - "0.0.0.0/0"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Security context (non-root, distroless image).
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault

@@ -21,7 +21,9 @@ const (
 
 // Collect builds a ClusterStatePayload by listing RBAC + workloads + secrets metadata.
 // It never reads Secret.Data — only metadata is captured.
-func Collect(ctx context.Context, cs *kubernetes.Clientset, clusterID string) (*model.ClusterStatePayload, error) {
+// If enableSecretReading is false (Zero-Trust default), the Secrets API is NOT called;
+// SecretRef entries are reconstructed from Pod mount references instead.
+func Collect(ctx context.Context, cs *kubernetes.Clientset, clusterID string, enableSecretReading bool) (*model.ClusterStatePayload, error) {
 	payload := &model.ClusterStatePayload{
 		SchemaVersion: model.SchemaVersion,
 		ClusterID:     clusterID,
@@ -69,11 +71,15 @@ func Collect(ctx context.Context, cs *kubernetes.Clientset, clusterID string) (*
 	}
 	payload.Workloads = deployments
 
-	secrets, err := listSecrets(ctx, cs, pods)
-	if err != nil {
-		return nil, fmt.Errorf("secrets: %w", err)
+	if enableSecretReading {
+		secrets, err := listSecrets(ctx, cs, pods)
+		if err != nil {
+			return nil, fmt.Errorf("secrets: %w", err)
+		}
+		payload.Secrets = secrets
+	} else {
+		payload.Secrets = secretsFromMounts(buildSecretMountIndex(pods))
 	}
-	payload.Secrets = secrets
 
 	roleIndex := indexRoles(roles)
 	clusterRoleIndex := indexClusterRoles(clusterRoles)
@@ -308,6 +314,34 @@ func getWorkloadName(p corev1.Pod) string {
 		return owner.Name
 	}
 	return p.Name
+}
+
+// secretsFromMounts reconstructs SecretRef entries WITHOUT calling the Secrets API.
+// Only Namespace, Name and MountedBy are populated; Type/Labels/Annotations stay zero.
+// Used when EnableSecretReading=false to keep the RBAC surface Zero-Trust.
+func secretsFromMounts(mountIdx map[string][]model.SecretMount) []model.SecretRef {
+	out := make([]model.SecretRef, 0, len(mountIdx))
+	for key, mounts := range mountIdx {
+		ns, name, ok := splitKey(key)
+		if !ok {
+			continue
+		}
+		out = append(out, model.SecretRef{
+			Namespace: ns,
+			Name:      name,
+			MountedBy: mounts,
+		})
+	}
+	return out
+}
+
+func splitKey(k string) (string, string, bool) {
+	for i := 0; i < len(k); i++ {
+		if k[i] == '/' {
+			return k[:i], k[i+1:], true
+		}
+	}
+	return "", "", false
 }
 
 func buildSecretMountIndex(pods []corev1.Pod) map[string][]model.SecretMount {
