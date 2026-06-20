@@ -1,4 +1,12 @@
 {{- if .Values.networkPolicy.enabled -}}
+{{- if not .Values.networkPolicy.egressCIDRs -}}
+{{- fail "networkPolicy.enabled=true requires networkPolicy.egressCIDRs (the EvoNHI control-plane CIDRs). Refusing to default to an allow-all egress." -}}
+{{- end -}}
+{{- range .Values.networkPolicy.egressCIDRs -}}
+{{- if eq (trim .) "0.0.0.0/0" -}}
+{{- fail "networkPolicy.egressCIDRs must not be 0.0.0.0/0 — that defeats the policy. Use the specific control-plane CIDR(s)." -}}
+{{- end -}}
+{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

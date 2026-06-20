@@ -65,11 +65,11 @@ func Collect(ctx context.Context, cs *kubernetes.Clientset, clusterID string, en
 		return nil, fmt.Errorf("pods: %w", err)
 	}
 
-	deployments, err := listDeployments(ctx, cs)
+	workloads, err := listWorkloads(ctx, cs)
 	if err != nil {
-		return nil, fmt.Errorf("deployments: %w", err)
+		return nil, fmt.Errorf("workloads: %w", err)
 	}
-	payload.Workloads = deployments
+	payload.Workloads = workloads
 
 	if enableSecretReading {
 		secrets, err := listSecrets(ctx, cs, pods)
@@ -226,43 +226,150 @@ func listPods(ctx context.Context, cs *kubernetes.Clientset) ([]corev1.Pod, erro
 	return out, nil
 }
 
-func listDeployments(ctx context.Context, cs *kubernetes.Clientset) ([]model.Workload, error) {
-	out := []model.Workload{}
-	opts := metav1.ListOptions{Limit: defaultPageSize}
+// paginate drives a Kubernetes list call across all continue tokens. fetch lists
+// one page with the given options and returns the next continue token ("" when done).
+func paginate(ctx context.Context, pageSize int64, fetch func(metav1.ListOptions) (string, error)) error {
+	_ = ctx // ctx is captured by fetch closures; kept here for call-site clarity.
+	opts := metav1.ListOptions{Limit: pageSize}
 	for {
+		cont, err := fetch(opts)
+		if err != nil {
+			return err
+		}
+		if cont == "" {
+			return nil
+		}
+		opts.Continue = cont
+	}
+}
+
+func replicasOrZero(r *int32) int32 {
+	if r != nil {
+		return *r
+	}
+	return 0
+}
+
+// buildWorkload normalizes any controller's pod template into a model.Workload.
+// ServiceAccount and criticality fall back to Kubernetes / product defaults.
+func buildWorkload(namespace, name, kind string, replicas int32, podSpec corev1.PodSpec, labels map[string]string) model.Workload {
+	sa := podSpec.ServiceAccountName
+	if sa == "" {
+		sa = "default"
+	}
+	crit := labels[labelCriticality]
+	if crit == "" {
+		crit = "medium"
+	}
+	return model.Workload{
+		Namespace:      namespace,
+		Name:           name,
+		Kind:           kind,
+		Replicas:       replicas,
+		ServiceAccount: sa,
+		Criticality:    crit,
+		TrafficRPS:     0,
+		Labels:         labels,
+	}
+}
+
+// listWorkloads enumerates every workload controller that can run as a
+// ServiceAccount: Deployments, StatefulSets, DaemonSets, standalone ReplicaSets,
+// standalone Jobs, and CronJobs. Controller-owned ReplicaSets (managed by a
+// Deployment) and Jobs (spawned by a CronJob) are skipped to avoid double counting.
+func listWorkloads(ctx context.Context, cs kubernetes.Interface) ([]model.Workload, error) {
+	out := []model.Workload{}
+
+	if err := paginate(ctx, defaultPageSize, func(opts metav1.ListOptions) (string, error) {
 		list, err := cs.AppsV1().Deployments("").List(ctx, opts)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		for _, d := range list.Items {
-			replicas := int32(0)
-			if d.Spec.Replicas != nil {
-				replicas = *d.Spec.Replicas
-			}
-			sa := d.Spec.Template.Spec.ServiceAccountName
-			if sa == "" {
-				sa = "default"
-			}
-			crit := d.Labels[labelCriticality]
-			if crit == "" {
-				crit = "medium"
-			}
-			out = append(out, model.Workload{
-				Namespace:      d.Namespace,
-				Name:           d.Name,
-				Kind:           "Deployment",
-				Replicas:       replicas,
-				ServiceAccount: sa,
-				Criticality:    crit,
-				TrafficRPS:     0,
-				Labels:         d.Labels,
-			})
+		for i := range list.Items {
+			d := &list.Items[i]
+			out = append(out, buildWorkload(d.Namespace, d.Name, "Deployment", replicasOrZero(d.Spec.Replicas), d.Spec.Template.Spec, d.Labels))
 		}
-		if list.Continue == "" {
-			break
-		}
-		opts.Continue = list.Continue
+		return list.Continue, nil
+	}); err != nil {
+		return nil, fmt.Errorf("deployments: %w", err)
 	}
+
+	if err := paginate(ctx, defaultPageSize, func(opts metav1.ListOptions) (string, error) {
+		list, err := cs.AppsV1().StatefulSets("").List(ctx, opts)
+		if err != nil {
+			return "", err
+		}
+		for i := range list.Items {
+			s := &list.Items[i]
+			out = append(out, buildWorkload(s.Namespace, s.Name, "StatefulSet", replicasOrZero(s.Spec.Replicas), s.Spec.Template.Spec, s.Labels))
+		}
+		return list.Continue, nil
+	}); err != nil {
+		return nil, fmt.Errorf("statefulsets: %w", err)
+	}
+
+	if err := paginate(ctx, defaultPageSize, func(opts metav1.ListOptions) (string, error) {
+		list, err := cs.AppsV1().DaemonSets("").List(ctx, opts)
+		if err != nil {
+			return "", err
+		}
+		for i := range list.Items {
+			ds := &list.Items[i]
+			out = append(out, buildWorkload(ds.Namespace, ds.Name, "DaemonSet", ds.Status.DesiredNumberScheduled, ds.Spec.Template.Spec, ds.Labels))
+		}
+		return list.Continue, nil
+	}); err != nil {
+		return nil, fmt.Errorf("daemonsets: %w", err)
+	}
+
+	if err := paginate(ctx, defaultPageSize, func(opts metav1.ListOptions) (string, error) {
+		list, err := cs.AppsV1().ReplicaSets("").List(ctx, opts)
+		if err != nil {
+			return "", err
+		}
+		for i := range list.Items {
+			rs := &list.Items[i]
+			if metav1.GetControllerOf(rs) != nil {
+				continue // owned by a Deployment; already represented
+			}
+			out = append(out, buildWorkload(rs.Namespace, rs.Name, "ReplicaSet", replicasOrZero(rs.Spec.Replicas), rs.Spec.Template.Spec, rs.Labels))
+		}
+		return list.Continue, nil
+	}); err != nil {
+		return nil, fmt.Errorf("replicasets: %w", err)
+	}
+
+	if err := paginate(ctx, defaultPageSize, func(opts metav1.ListOptions) (string, error) {
+		list, err := cs.BatchV1().Jobs("").List(ctx, opts)
+		if err != nil {
+			return "", err
+		}
+		for i := range list.Items {
+			j := &list.Items[i]
+			if metav1.GetControllerOf(j) != nil {
+				continue // spawned by a CronJob; already represented
+			}
+			out = append(out, buildWorkload(j.Namespace, j.Name, "Job", replicasOrZero(j.Spec.Parallelism), j.Spec.Template.Spec, j.Labels))
+		}
+		return list.Continue, nil
+	}); err != nil {
+		return nil, fmt.Errorf("jobs: %w", err)
+	}
+
+	if err := paginate(ctx, defaultPageSize, func(opts metav1.ListOptions) (string, error) {
+		list, err := cs.BatchV1().CronJobs("").List(ctx, opts)
+		if err != nil {
+			return "", err
+		}
+		for i := range list.Items {
+			cj := &list.Items[i]
+			out = append(out, buildWorkload(cj.Namespace, cj.Name, "CronJob", 0, cj.Spec.JobTemplate.Spec.Template.Spec, cj.Labels))
+		}
+		return list.Continue, nil
+	}); err != nil {
+		return nil, fmt.Errorf("cronjobs: %w", err)
+	}
+
 	return out, nil
 }
 

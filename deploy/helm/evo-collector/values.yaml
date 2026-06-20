@@ -59,8 +59,12 @@ timeouts:
 # the rules you want, and set egressCIDRs to your control-plane network.
 networkPolicy:
   enabled: false
-  egressCIDRs:
-    - "0.0.0.0/0"
+  # Required when enabled: the EvoNHI control-plane egress CIDR(s). Left empty on
+  # purpose — an allow-all (0.0.0.0/0) default would defeat the policy. Set this to
+  # the specific CIDR(s) your SaaS ingress resolves to, e.g.:
+  #   egressCIDRs:
+  #     - "203.0.113.10/32"
+  egressCIDRs: []
 
 nodeSelector: {}
 tolerations: []

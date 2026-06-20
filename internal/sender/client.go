@@ -115,7 +115,12 @@ func (c *Client) doOnce(ctx context.Context, body []byte) (int, []byte, error) {
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	rb, readErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if readErr != nil {
+		// Surface the status with whatever was read plus the read failure, so a
+		// truncated/failed body can't silently hide the real server response.
+		return resp.StatusCode, rb, fmt.Errorf("reading response body: %w", readErr)
+	}
 	return resp.StatusCode, rb, nil
 }
 
