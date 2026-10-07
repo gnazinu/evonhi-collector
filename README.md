@@ -10,12 +10,12 @@ The **EvoNHI Collector** is a read-only, lightweight agent designed to securely 
 ## Core Principles
 * **Read-Only Execution:** Requires minimal RBAC permissions (`get`, `list` on core and rbac resources). It cannot mutate cluster state.
 * **Stateless:** Does not store historical data on the cluster.
-* **Cryptographically Secure:** Payloads are signed and encrypted before leaving the cluster boundary.
+* **Authenticated transport:** Payloads are signed with HMAC-SHA256 over `timestamp || body` (replay window enforced server-side) and must be sent over TLS. The payload itself is not encrypted at the application layer.
 
 ## Development
 
 ### Prerequisites
-* Go 1.21+
+* Go 1.25+
 * A running Kubernetes cluster (e.g., Minikube, Kind)
 * Valid `~/.kube/config`
 
@@ -24,3 +24,6 @@ Currently, the agent authenticates using your local kubeconfig to test extractio
 
 ```bash
 go run cmd/agent/main.go
+
+Part of the EvoNHI ecosystem — the payload is consumed by the private platform and translated by the open
+[`evonhi-core`](https://github.com/gnazinu/evonhi-core) engine.

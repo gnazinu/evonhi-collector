@@ -1,3 +1,6 @@
+> **Histórico (mayo 2026).** Las fases 1–4 de este plan ya están implementadas. El estado y roadmap vigentes del
+> ecosistema viven en `evonhi-platform/docs/ROADMAP.md`.
+
 # Contexto: EvoNHI Collector (Go Agent)
 
 ## Estado Actual
