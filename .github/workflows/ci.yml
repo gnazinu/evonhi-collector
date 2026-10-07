@@ -48,31 +48,71 @@ jobs:
       - name: Build
         run: go build ./...
 
+  contract:
+    name: Snapshot contract (golden vs evonhi-core schema)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate the golden payload against the published contract and adapter
+        env:
+          CORE_REF: v0.2.1
+        run: |
+          pip install jsonschema "evonhi-core @ git+https://github.com/${{ github.repository_owner }}/evonhi-core.git@${CORE_REF}"
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository_owner }}/evonhi-core/${CORE_REF}/contracts/cluster-snapshot.v1.schema.json" -o schema.json
+          python - <<'PY'
+          import json, jsonschema
+          from evonhi_core.providers.kubernetes.snapshot import cluster_model_from_snapshot
+          payload = json.load(open("internal/k8s/testdata/snapshot.golden.json"))
+          jsonschema.validate(payload, json.load(open("schema.json")))
+          model = cluster_model_from_snapshot(payload)
+          print(f"contract OK: {len(model.workloads)} workloads, {len(model.role_bindings)} bindings")
+          PY
+
   image:
-    name: Container image (build • scan • sign)
+    name: Container image (build • scan • push • sign)
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
       id-token: write # cosign keyless signing
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/evonhi-collector
     steps:
       - uses: actions/checkout@v4
 
       - name: Build image
-        run: docker build -t evo-collector:${{ github.sha }} .
+        run: docker build -t "$IMAGE:${{ github.sha }}" .
 
       - name: Scan image (Trivy)
         uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: evo-collector:${{ github.sha }}
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
 
+      # Only tags publish. cosign signs a registry digest, so the image must be pushed first
+      # (signing a local, never-pushed tag cannot work).
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push image
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: push
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:$version"
+          docker push "$IMAGE:$version"
+          echo "digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$version")" >> "$GITHUB_OUTPUT"
+
       - name: Install cosign
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign image (keyless, tags only)
-        if: startsWith(github.ref, 'refs/tags/')
-        run: cosign sign --yes evo-collector:${{ github.sha }}
+      - name: Sign image digest (keyless)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cosign sign --yes "${{ steps.push.outputs.digest }}"

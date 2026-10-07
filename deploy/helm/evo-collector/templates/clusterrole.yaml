@@ -5,20 +5,20 @@ metadata:
   labels:
     {{- include "evo-collector.labels" . | nindent 4 }}
 rules:
-  # Core API — strictly read-only metadata.
+  # Least privilege: exactly what internal/k8s/collector.go lists (enforced by
+  # TestClusterRoleCoversEverythingTheAgentLists). get/list only, no watch.
   - apiGroups: [""]
     resources:
       - serviceaccounts
       - pods
-      - configmaps
-      - namespaces
-    verbs: ["get", "list", "watch"]
+      - services
+    verbs: ["get", "list"]
   {{- if .Values.rbac.allowSecretReading }}
   # Opt-in: Secrets metadata (.data is never read by the agent).
   - apiGroups: [""]
     resources:
       - secrets
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list"]
   {{- end }}
   # Workloads.
   - apiGroups: ["apps"]
@@ -27,7 +27,17 @@ rules:
       - statefulsets
       - daemonsets
       - replicasets
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list"]
+  # External exposure (entry points).
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list"]
   # RBAC graph.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources:
@@ -35,4 +45,4 @@ rules:
       - clusterroles
       - rolebindings
       - clusterrolebindings
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list"]

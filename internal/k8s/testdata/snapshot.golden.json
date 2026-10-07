@@ -1,0 +1,159 @@
+{
+  "schema_version": "1.1",
+  "cluster_id": "fake-cluster",
+  "collected_at": "2026-10-07T12:00:00Z",
+  "workloads": [
+    {
+      "namespace": "shop",
+      "name": "web",
+      "kind": "Deployment",
+      "replicas": 2,
+      "service_account": "web-sa",
+      "criticality": "medium",
+      "traffic_rps": 0,
+      "automount_token": null,
+      "mounted_secrets": [],
+      "public": true,
+      "exposed_by": [
+        "service/LoadBalancer/web"
+      ]
+    },
+    {
+      "namespace": "shop",
+      "name": "worker",
+      "kind": "Deployment",
+      "replicas": 1,
+      "service_account": "worker-sa",
+      "criticality": "medium",
+      "traffic_rps": 0,
+      "automount_token": null,
+      "mounted_secrets": [
+        "db-creds"
+      ],
+      "public": false,
+      "exposed_by": []
+    }
+  ],
+  "service_accounts": [
+    {
+      "namespace": "shop",
+      "name": "web-sa",
+      "annotations": {
+        "eks.amazonaws.com/role-arn": "arn:aws:iam::111:role/web"
+      },
+      "automount_token": null
+    },
+    {
+      "namespace": "shop",
+      "name": "worker-sa",
+      "automount_token": false
+    }
+  ],
+  "roles": [
+    {
+      "namespace": "shop",
+      "name": "deployer",
+      "rules": [
+        {
+          "api_groups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments"
+          ],
+          "verbs": [
+            "patch"
+          ]
+        }
+      ]
+    }
+  ],
+  "cluster_roles": [
+    {
+      "name": "secret-reader",
+      "rules": [
+        {
+          "api_groups": [
+            ""
+          ],
+          "resources": [
+            "secrets"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    }
+  ],
+  "role_bindings": [
+    {
+      "namespace": "shop",
+      "name": "web-deploys",
+      "role_ref": {
+        "api_group": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "deployer"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "web-sa",
+          "namespace": "shop"
+        }
+      ]
+    },
+    {
+      "namespace": "shop",
+      "name": "worker-reads",
+      "role_ref": {
+        "api_group": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "secret-reader"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "worker-sa"
+        }
+      ]
+    }
+  ],
+  "cluster_role_bindings": [],
+  "secrets": [
+    {
+      "namespace": "shop",
+      "name": "db-creds",
+      "type": "",
+      "mounted_by": [
+        {
+          "via": "volume",
+          "namespace": "shop",
+          "workload": "worker",
+          "service_account": "worker-sa"
+        }
+      ]
+    }
+  ],
+  "permissions": [
+    {
+      "namespace": "shop",
+      "service_account": "web-sa",
+      "api_group": "apps",
+      "resource": "deployments",
+      "verb": "patch",
+      "recent_requests": 0,
+      "source": "RoleBinding/shop/web-deploys"
+    },
+    {
+      "namespace": "shop",
+      "service_account": "worker-sa",
+      "api_group": "",
+      "resource": "secrets",
+      "verb": "get",
+      "recent_requests": 0,
+      "source": "RoleBinding/shop/worker-reads"
+    }
+  ],
+  "usage": null
+}

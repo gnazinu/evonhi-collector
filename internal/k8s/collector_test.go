@@ -16,7 +16,7 @@ func ptr32(v int32) *int32 { return &v }
 func podSpec(sa string) corev1.PodSpec { return corev1.PodSpec{ServiceAccountName: sa} }
 
 func TestBuildWorkloadDefaults(t *testing.T) {
-	w := buildWorkload("ns", "name", "Deployment", 3, corev1.PodSpec{}, nil)
+	w := buildWorkload("ns", "name", "Deployment", 3, corev1.PodSpec{}, nil, nil)
 	if w.ServiceAccount != "default" {
 		t.Errorf("expected SA fallback 'default', got %q", w.ServiceAccount)
 	}
@@ -24,7 +24,7 @@ func TestBuildWorkloadDefaults(t *testing.T) {
 		t.Errorf("expected criticality fallback 'medium', got %q", w.Criticality)
 	}
 
-	labeled := buildWorkload("ns", "n", "Deployment", 1, podSpec("app-sa"), map[string]string{labelCriticality: "high"})
+	labeled := buildWorkload("ns", "n", "Deployment", 1, podSpec("app-sa"), map[string]string{labelCriticality: "high"}, nil)
 	if labeled.ServiceAccount != "app-sa" || labeled.Criticality != "high" {
 		t.Errorf("expected explicit SA/criticality, got %q/%q", labeled.ServiceAccount, labeled.Criticality)
 	}
