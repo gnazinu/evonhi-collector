@@ -6,6 +6,8 @@ type ServiceAccount struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Secrets     []string          `json:"secrets,omitempty"`
+	// AutomountToken is the service account's automountServiceAccountToken (since schema 1.1).
+	AutomountToken *bool `json:"automount_token"`
 }
 
 type PolicyRule struct {

@@ -1,6 +1,6 @@
 image:
-  repository: ghcr.io/evonhi/evo-collector
-  tag: "0.1.0"
+  repository: ghcr.io/gnazinu/evonhi-collector  # moves with the GitHub org (docs/ecosystem)
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 
 # Logical cluster identifier reported in every payload.

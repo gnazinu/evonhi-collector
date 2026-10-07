@@ -3,12 +3,14 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/tu-usuario/evonhi-collector/internal/model"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -23,7 +25,7 @@ const (
 // It never reads Secret.Data — only metadata is captured.
 // If enableSecretReading is false (Zero-Trust default), the Secrets API is NOT called;
 // SecretRef entries are reconstructed from Pod mount references instead.
-func Collect(ctx context.Context, cs *kubernetes.Clientset, clusterID string, enableSecretReading bool) (*model.ClusterStatePayload, error) {
+func Collect(ctx context.Context, cs kubernetes.Interface, clusterID string, enableSecretReading bool) (*model.ClusterStatePayload, error) {
 	payload := &model.ClusterStatePayload{
 		SchemaVersion: model.SchemaVersion,
 		ClusterID:     clusterID,
@@ -69,6 +71,15 @@ func Collect(ctx context.Context, cs *kubernetes.Clientset, clusterID string, en
 	if err != nil {
 		return nil, fmt.Errorf("workloads: %w", err)
 	}
+	services, err := listServices(ctx, cs)
+	if err != nil {
+		return nil, fmt.Errorf("services: %w", err)
+	}
+	ingresses, err := listIngresses(ctx, cs)
+	if err != nil {
+		return nil, fmt.Errorf("ingresses: %w", err)
+	}
+	markExposure(workloads, services, ingresses)
 	payload.Workloads = workloads
 
 	if enableSecretReading {
@@ -88,7 +99,7 @@ func Collect(ctx context.Context, cs *kubernetes.Clientset, clusterID string, en
 	return payload, nil
 }
 
-func listServiceAccounts(ctx context.Context, cs *kubernetes.Clientset) ([]model.ServiceAccount, error) {
+func listServiceAccounts(ctx context.Context, cs kubernetes.Interface) ([]model.ServiceAccount, error) {
 	out := []model.ServiceAccount{}
 	opts := metav1.ListOptions{Limit: defaultPageSize}
 	for {
@@ -102,11 +113,12 @@ func listServiceAccounts(ctx context.Context, cs *kubernetes.Clientset) ([]model
 				refs = append(refs, s.Name)
 			}
 			out = append(out, model.ServiceAccount{
-				Namespace:   sa.Namespace,
-				Name:        sa.Name,
-				Labels:      sa.Labels,
-				Annotations: sa.Annotations,
-				Secrets:     refs,
+				Namespace:      sa.Namespace,
+				Name:           sa.Name,
+				Labels:         sa.Labels,
+				Annotations:    sanitizeAnnotations(sa.Annotations),
+				Secrets:        refs,
+				AutomountToken: sa.AutomountServiceAccountToken,
 			})
 		}
 		if list.Continue == "" {
@@ -117,7 +129,7 @@ func listServiceAccounts(ctx context.Context, cs *kubernetes.Clientset) ([]model
 	return out, nil
 }
 
-func listRoles(ctx context.Context, cs *kubernetes.Clientset) ([]model.Role, error) {
+func listRoles(ctx context.Context, cs kubernetes.Interface) ([]model.Role, error) {
 	out := []model.Role{}
 	opts := metav1.ListOptions{Limit: defaultPageSize}
 	for {
@@ -140,7 +152,7 @@ func listRoles(ctx context.Context, cs *kubernetes.Clientset) ([]model.Role, err
 	return out, nil
 }
 
-func listClusterRoles(ctx context.Context, cs *kubernetes.Clientset) ([]model.ClusterRole, error) {
+func listClusterRoles(ctx context.Context, cs kubernetes.Interface) ([]model.ClusterRole, error) {
 	out := []model.ClusterRole{}
 	opts := metav1.ListOptions{Limit: defaultPageSize}
 	for {
@@ -162,7 +174,7 @@ func listClusterRoles(ctx context.Context, cs *kubernetes.Clientset) ([]model.Cl
 	return out, nil
 }
 
-func listRoleBindings(ctx context.Context, cs *kubernetes.Clientset) ([]model.RoleBinding, error) {
+func listRoleBindings(ctx context.Context, cs kubernetes.Interface) ([]model.RoleBinding, error) {
 	out := []model.RoleBinding{}
 	opts := metav1.ListOptions{Limit: defaultPageSize}
 	for {
@@ -186,7 +198,7 @@ func listRoleBindings(ctx context.Context, cs *kubernetes.Clientset) ([]model.Ro
 	return out, nil
 }
 
-func listClusterRoleBindings(ctx context.Context, cs *kubernetes.Clientset) ([]model.ClusterRoleBinding, error) {
+func listClusterRoleBindings(ctx context.Context, cs kubernetes.Interface) ([]model.ClusterRoleBinding, error) {
 	out := []model.ClusterRoleBinding{}
 	opts := metav1.ListOptions{Limit: defaultPageSize}
 	for {
@@ -209,7 +221,7 @@ func listClusterRoleBindings(ctx context.Context, cs *kubernetes.Clientset) ([]m
 	return out, nil
 }
 
-func listPods(ctx context.Context, cs *kubernetes.Clientset) ([]corev1.Pod, error) {
+func listPods(ctx context.Context, cs kubernetes.Interface) ([]corev1.Pod, error) {
 	out := []corev1.Pod{}
 	opts := metav1.ListOptions{Limit: defaultPageSize}
 	for {
@@ -252,7 +264,7 @@ func replicasOrZero(r *int32) int32 {
 
 // buildWorkload normalizes any controller's pod template into a model.Workload.
 // ServiceAccount and criticality fall back to Kubernetes / product defaults.
-func buildWorkload(namespace, name, kind string, replicas int32, podSpec corev1.PodSpec, labels map[string]string) model.Workload {
+func buildWorkload(namespace, name, kind string, replicas int32, podSpec corev1.PodSpec, labels, podLabels map[string]string) model.Workload {
 	sa := podSpec.ServiceAccountName
 	if sa == "" {
 		sa = "default"
@@ -270,6 +282,10 @@ func buildWorkload(namespace, name, kind string, replicas int32, podSpec corev1.
 		Criticality:    crit,
 		TrafficRPS:     0,
 		Labels:         labels,
+		AutomountToken: podSpec.AutomountServiceAccountToken,
+		MountedSecrets: readableSecrets(podSpec),
+		ExposedBy:      []string{},
+		PodLabels:      podLabels,
 	}
 }
 
@@ -287,7 +303,7 @@ func listWorkloads(ctx context.Context, cs kubernetes.Interface) ([]model.Worklo
 		}
 		for i := range list.Items {
 			d := &list.Items[i]
-			out = append(out, buildWorkload(d.Namespace, d.Name, "Deployment", replicasOrZero(d.Spec.Replicas), d.Spec.Template.Spec, d.Labels))
+			out = append(out, buildWorkload(d.Namespace, d.Name, "Deployment", replicasOrZero(d.Spec.Replicas), d.Spec.Template.Spec, d.Labels, d.Spec.Template.Labels))
 		}
 		return list.Continue, nil
 	}); err != nil {
@@ -301,7 +317,7 @@ func listWorkloads(ctx context.Context, cs kubernetes.Interface) ([]model.Worklo
 		}
 		for i := range list.Items {
 			s := &list.Items[i]
-			out = append(out, buildWorkload(s.Namespace, s.Name, "StatefulSet", replicasOrZero(s.Spec.Replicas), s.Spec.Template.Spec, s.Labels))
+			out = append(out, buildWorkload(s.Namespace, s.Name, "StatefulSet", replicasOrZero(s.Spec.Replicas), s.Spec.Template.Spec, s.Labels, s.Spec.Template.Labels))
 		}
 		return list.Continue, nil
 	}); err != nil {
@@ -315,7 +331,7 @@ func listWorkloads(ctx context.Context, cs kubernetes.Interface) ([]model.Worklo
 		}
 		for i := range list.Items {
 			ds := &list.Items[i]
-			out = append(out, buildWorkload(ds.Namespace, ds.Name, "DaemonSet", ds.Status.DesiredNumberScheduled, ds.Spec.Template.Spec, ds.Labels))
+			out = append(out, buildWorkload(ds.Namespace, ds.Name, "DaemonSet", ds.Status.DesiredNumberScheduled, ds.Spec.Template.Spec, ds.Labels, ds.Spec.Template.Labels))
 		}
 		return list.Continue, nil
 	}); err != nil {
@@ -332,7 +348,7 @@ func listWorkloads(ctx context.Context, cs kubernetes.Interface) ([]model.Worklo
 			if metav1.GetControllerOf(rs) != nil {
 				continue // owned by a Deployment; already represented
 			}
-			out = append(out, buildWorkload(rs.Namespace, rs.Name, "ReplicaSet", replicasOrZero(rs.Spec.Replicas), rs.Spec.Template.Spec, rs.Labels))
+			out = append(out, buildWorkload(rs.Namespace, rs.Name, "ReplicaSet", replicasOrZero(rs.Spec.Replicas), rs.Spec.Template.Spec, rs.Labels, rs.Spec.Template.Labels))
 		}
 		return list.Continue, nil
 	}); err != nil {
@@ -349,7 +365,7 @@ func listWorkloads(ctx context.Context, cs kubernetes.Interface) ([]model.Worklo
 			if metav1.GetControllerOf(j) != nil {
 				continue // spawned by a CronJob; already represented
 			}
-			out = append(out, buildWorkload(j.Namespace, j.Name, "Job", replicasOrZero(j.Spec.Parallelism), j.Spec.Template.Spec, j.Labels))
+			out = append(out, buildWorkload(j.Namespace, j.Name, "Job", replicasOrZero(j.Spec.Parallelism), j.Spec.Template.Spec, j.Labels, j.Spec.Template.Labels))
 		}
 		return list.Continue, nil
 	}); err != nil {
@@ -363,7 +379,7 @@ func listWorkloads(ctx context.Context, cs kubernetes.Interface) ([]model.Worklo
 		}
 		for i := range list.Items {
 			cj := &list.Items[i]
-			out = append(out, buildWorkload(cj.Namespace, cj.Name, "CronJob", 0, cj.Spec.JobTemplate.Spec.Template.Spec, cj.Labels))
+			out = append(out, buildWorkload(cj.Namespace, cj.Name, "CronJob", 0, cj.Spec.JobTemplate.Spec.Template.Spec, cj.Labels, cj.Spec.JobTemplate.Spec.Template.Labels))
 		}
 		return list.Continue, nil
 	}); err != nil {
@@ -375,7 +391,7 @@ func listWorkloads(ctx context.Context, cs kubernetes.Interface) ([]model.Worklo
 
 // listSecrets enumerates Secrets capturing ONLY metadata. Secret.Data is never read.
 // mounted_by is derived from the pod list.
-func listSecrets(ctx context.Context, cs *kubernetes.Clientset, pods []corev1.Pod) ([]model.SecretRef, error) {
+func listSecrets(ctx context.Context, cs kubernetes.Interface, pods []corev1.Pod) ([]model.SecretRef, error) {
 	mountIdx := buildSecretMountIndex(pods)
 	out := []model.SecretRef{}
 	opts := metav1.ListOptions{Limit: defaultPageSize}
@@ -397,7 +413,7 @@ func listSecrets(ctx context.Context, cs *kubernetes.Clientset, pods []corev1.Po
 				Name:        s.Name,
 				Type:        string(s.Type),
 				Labels:      s.Labels,
-				Annotations: s.Annotations,
+				Annotations: secretAnnotations(s.Annotations),
 				MountedBy:   mounts,
 			})
 		}
@@ -439,6 +455,13 @@ func secretsFromMounts(mountIdx map[string][]model.SecretMount) []model.SecretRe
 			MountedBy: mounts,
 		})
 	}
+	// Map iteration order is random; a stable order keeps payload digests (and snapshots) stable.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Namespace != out[j].Namespace {
+			return out[i].Namespace < out[j].Namespace
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out
 }
 
@@ -453,41 +476,80 @@ func splitKey(k string) (string, string, bool) {
 
 func buildSecretMountIndex(pods []corev1.Pod) map[string][]model.SecretMount {
 	idx := map[string][]model.SecretMount{}
-	add := func(ns, secretName string, m model.SecretMount) {
-		if secretName == "" {
-			return
-		}
-		key := ns + "/" + secretName
-		idx[key] = append(idx[key], m)
-	}
 	for _, p := range pods {
 		sa := p.Spec.ServiceAccountName
 		if sa == "" {
 			sa = "default"
 		}
-		mount := model.SecretMount{Namespace: p.Namespace, Workload: getWorkloadName(p), ServiceAccount: sa}
-		for _, v := range p.Spec.Volumes {
-			if v.Secret != nil {
-				add(p.Namespace, v.Secret.SecretName, mount)
+		base := model.SecretMount{Namespace: p.Namespace, Workload: getWorkloadName(p), ServiceAccount: sa}
+		add := func(secretName, via string) {
+			if secretName == "" {
+				return
 			}
+			m := base
+			m.Via = via
+			key := p.Namespace + "/" + secretName
+			idx[key] = append(idx[key], m)
+		}
+		for _, ref := range secretRefs(p.Spec) {
+			add(ref.name, ref.via)
 		}
 		for _, ips := range p.Spec.ImagePullSecrets {
-			add(p.Namespace, ips.Name, mount)
+			add(ips.Name, "imagePullSecret")
 		}
-		for _, c := range p.Spec.Containers {
-			for _, ef := range c.EnvFrom {
-				if ef.SecretRef != nil {
-					add(p.Namespace, ef.SecretRef.Name, mount)
-				}
-			}
-			for _, e := range c.Env {
-				if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
-					add(p.Namespace, e.ValueFrom.SecretKeyRef.Name, mount)
+	}
+	return idx
+}
+
+type secretRef struct {
+	name string
+	via  string
+}
+
+// secretRefs lists the secrets a pod spec exposes to its containers: secret and projected
+// volumes, env valueFrom.secretKeyRef and envFrom.secretRef, in regular and init containers.
+func secretRefs(spec corev1.PodSpec) []secretRef {
+	out := []secretRef{}
+	for _, v := range spec.Volumes {
+		if v.Secret != nil {
+			out = append(out, secretRef{v.Secret.SecretName, "volume"})
+		}
+		if v.Projected != nil {
+			for _, src := range v.Projected.Sources {
+				if src.Secret != nil {
+					out = append(out, secretRef{src.Secret.Name, "volume"})
 				}
 			}
 		}
 	}
-	return idx
+	containers := append(append([]corev1.Container{}, spec.InitContainers...), spec.Containers...)
+	for _, c := range containers {
+		for _, ef := range c.EnvFrom {
+			if ef.SecretRef != nil {
+				out = append(out, secretRef{ef.SecretRef.Name, "envFrom"})
+			}
+		}
+		for _, e := range c.Env {
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+				out = append(out, secretRef{e.ValueFrom.SecretKeyRef.Name, "env"})
+			}
+		}
+	}
+	return out
+}
+
+// readableSecrets is the sorted, de-duplicated set of secret names a container can read.
+func readableSecrets(spec corev1.PodSpec) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, ref := range secretRefs(spec) {
+		if ref.name != "" && !seen[ref.name] {
+			seen[ref.name] = true
+			out = append(out, ref.name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func convertRules(in []rbacv1.PolicyRule) []model.PolicyRule {
@@ -617,4 +679,140 @@ func derivePermissions(
 	}
 
 	return out
+}
+
+// lastAppliedAnnotation holds the full object as last applied by kubectl — for a Secret that
+// includes its data. It is never forwarded.
+const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
+
+// secretAnnotationAllowlist are the only Secret annotations forwarded: they link a token secret
+// to its service account and carry EvoNHI's own hints. Everything else may embed secret material.
+var secretAnnotationAllowlist = map[string]bool{
+	"kubernetes.io/service-account.name": true,
+	"kubernetes.io/service-account.uid":  true,
+}
+
+func sanitizeAnnotations(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if k == lastAppliedAnnotation {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func secretAnnotations(in map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range in {
+		if secretAnnotationAllowlist[k] || strings.HasPrefix(k, "evonhi.io/") {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func listServices(ctx context.Context, cs kubernetes.Interface) ([]corev1.Service, error) {
+	out := []corev1.Service{}
+	err := paginate(ctx, defaultPageSize, func(opts metav1.ListOptions) (string, error) {
+		list, err := cs.CoreV1().Services("").List(ctx, opts)
+		if err != nil {
+			return "", err
+		}
+		out = append(out, list.Items...)
+		return list.Continue, nil
+	})
+	return out, err
+}
+
+func listIngresses(ctx context.Context, cs kubernetes.Interface) ([]networkingv1.Ingress, error) {
+	out := []networkingv1.Ingress{}
+	err := paginate(ctx, defaultPageSize, func(opts metav1.ListOptions) (string, error) {
+		list, err := cs.NetworkingV1().Ingresses("").List(ctx, opts)
+		if err != nil {
+			return "", err
+		}
+		out = append(out, list.Items...)
+		return list.Continue, nil
+	})
+	return out, err
+}
+
+// markExposure flags workloads reachable from outside the cluster: pods selected by a
+// LoadBalancer/NodePort Service or one with external IPs, or by any Service an Ingress routes to.
+func markExposure(workloads []model.Workload, services []corev1.Service, ingresses []networkingv1.Ingress) {
+	byKey := map[string]corev1.Service{}
+	for _, svc := range services {
+		byKey[svc.Namespace+"/"+svc.Name] = svc
+	}
+	expose := func(svc corev1.Service, reason string) {
+		if len(svc.Spec.Selector) == 0 {
+			return // no selector: endpoints are managed manually, nothing to attribute
+		}
+		for i := range workloads {
+			w := &workloads[i]
+			if w.Namespace == svc.Namespace && selects(svc.Spec.Selector, w.PodLabels) {
+				w.Public = true
+				w.ExposedBy = appendUnique(w.ExposedBy, reason)
+			}
+		}
+	}
+	for _, svc := range services {
+		switch {
+		case svc.Spec.Type == corev1.ServiceTypeLoadBalancer, svc.Spec.Type == corev1.ServiceTypeNodePort:
+			expose(svc, "service/"+string(svc.Spec.Type)+"/"+svc.Name)
+		case len(svc.Spec.ExternalIPs) > 0:
+			expose(svc, "service/ExternalIP/"+svc.Name)
+		}
+	}
+	for _, ing := range ingresses {
+		for _, name := range ingressBackends(ing) {
+			if svc, ok := byKey[ing.Namespace+"/"+name]; ok {
+				expose(svc, "ingress/"+ing.Name)
+			}
+		}
+	}
+}
+
+func ingressBackends(ing networkingv1.Ingress) []string {
+	out := []string{}
+	if b := ing.Spec.DefaultBackend; b != nil && b.Service != nil {
+		out = append(out, b.Service.Name)
+	}
+	for _, rule := range ing.Spec.Rules {
+		if rule.HTTP == nil {
+			continue
+		}
+		for _, path := range rule.HTTP.Paths {
+			if path.Backend.Service != nil {
+				out = append(out, path.Backend.Service.Name)
+			}
+		}
+	}
+	return out
+}
+
+func selects(selector, labels map[string]string) bool {
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func appendUnique(list []string, item string) []string {
+	for _, existing := range list {
+		if existing == item {
+			return list
+		}
+	}
+	return append(list, item)
 }

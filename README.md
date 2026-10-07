@@ -12,6 +12,21 @@ The **EvoNHI Collector** is a read-only, lightweight agent designed to securely 
 * **Stateless:** Does not store historical data on the cluster.
 * **Authenticated transport:** Payloads are signed with HMAC-SHA256 over `timestamp || body` (replay window enforced server-side) and must be sent over TLS. The payload itself is not encrypted at the application layer.
 
+## What it sends (schema 1.1)
+
+Contract: [`evonhi-core/contracts/cluster-snapshot.v1.schema.json`](https://github.com/gnazinu/evonhi-core/blob/main/contracts/cluster-snapshot.v1.schema.json),
+frozen by `internal/k8s/testdata/snapshot.golden.json` and validated against the published schema in CI.
+
+* RBAC: service accounts (with `automountServiceAccountToken`), roles, cluster roles and their bindings.
+* Workloads: service account, readable secrets (volumes, projected volumes, `env`, `envFrom` — never
+  `imagePullSecrets`) and **external exposure** (LoadBalancer/NodePort Services, external IPs, Ingress backends).
+* Secret metadata only. `kubectl.kubernetes.io/last-applied-configuration` is never forwarded and Secret
+  annotations are allow-listed, because they can embed the secret's data.
+* `usage: null` until an audit-log source is wired, so the control plane reports telemetry confidence 0.
+
+Required RBAC (`deploy/helm`): `get`/`list` on exactly the resources above, enforced by
+`TestClusterRoleCoversEverythingTheAgentLists`.
+
 ## Development
 
 ### Prerequisites
